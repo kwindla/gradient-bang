@@ -388,7 +388,7 @@ class ChatAgent(BaseLLMAgent):
 
                 return {
                     "success": True,
-                    "total_sectors_visited": len(sectors_visited),
+                    "total_sectors_visited": map_data.get("total_sectors_visited", len(sectors_visited)),
                     "ports_discovered": len(sectors_with_ports),
                     "ports": sectors_with_ports if show_ports else None,
                 }
