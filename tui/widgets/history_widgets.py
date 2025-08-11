@@ -22,18 +22,17 @@ class MovementHistoryWidget(Vertical):
         self.table.add_columns("Time", "From", "To", "Port")
         self.history: deque = deque(maxlen=20)
     
-    def add_movement(self, from_sector: int, to_sector: int, has_port: bool = False):
+    def add_movement(self, from_sector: int, to_sector: int, port_code: str = ""):
         """Add a movement to the history.
         
         Args:
             from_sector: Source sector
             to_sector: Destination sector
-            has_port: Whether destination has a port
+            port_code: Port BBB code if destination has a port (e.g. "BSS")
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
-        port_str = "P" if has_port else ""
         
-        self.history.append((timestamp, from_sector, to_sector, port_str))
+        self.history.append((timestamp, from_sector, to_sector, port_code))
         
         # Update table
         self.table.clear()

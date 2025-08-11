@@ -20,6 +20,7 @@ from tui.widgets.map_widget import MapWidget
 from tui.widgets.history_widgets import MovementHistoryWidget, PortHistoryWidget
 from tui.widgets.progress_widget import ProgressWidget
 from tui.widgets.debug_widget import DebugWidget
+from tui.widgets.status_bar_widget import StatusBarWidget
 from tui.task_manager import TaskManager
 from utils.api_client import AsyncGameClient
 from utils.base_llm_agent import LLMConfig
@@ -36,6 +37,13 @@ class PlayerApp(App):
     """Main TUI application for player interaction."""
     
     CSS = """
+    #status-bar {
+        height: 3;
+        border: solid white;
+        padding: 0 1;
+        background: $boost;
+    }
+    
     #chat-container {
         height: 2fr;
         border: solid cyan;
@@ -132,6 +140,7 @@ class PlayerApp(App):
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
         yield Header(show_clock=True)
+        yield StatusBarWidget(id="status-bar")
         
         with Horizontal():
             # Left panel - Chat and Task Output
@@ -159,6 +168,7 @@ class PlayerApp(App):
         self.movement_history = self.query_one("#movement-history", MovementHistoryWidget)
         self.port_history = self.query_one("#port-history", PortHistoryWidget)
         self.debug_widget = self.query_one("#debug-widget", DebugWidget)
+        self.status_bar = self.query_one("#status-bar", StatusBarWidget)
         self.right_panel = self.query_one("#right-panel", Vertical)
         
         # Start with debug mode enabled (show debug, hide others)
@@ -187,6 +197,9 @@ class PlayerApp(App):
             status = await self.game_client.join(self.character_id)
             self.current_sector = status.sector
             
+            # Update status bar with initial state
+            self.status_bar.update_from_status(status.model_dump())
+            
             # Create separate LLM configs for chat and task agents
             chat_config = LLMConfig(model=self.chat_model)  # Faster, cheaper for chat
             task_config = LLMConfig(model=self.task_model)   # More capable for complex tasks
@@ -199,7 +212,8 @@ class PlayerApp(App):
                 task_config=task_config,
                 output_callback=self._task_output_callback,
                 progress_callback=self._progress_callback,
-                task_complete_callback=lambda was_cancelled, via_stop_tool: asyncio.create_task(self._on_task_complete(was_cancelled, via_stop_tool))
+                task_complete_callback=lambda was_cancelled, via_stop_tool: asyncio.create_task(self._on_task_complete(was_cancelled, via_stop_tool)),
+                status_callback=self._status_update_callback
             )
             
             # Set debug callback for chat agent
@@ -223,6 +237,39 @@ class PlayerApp(App):
             text: Output text from task execution
         """
         self.task_output.add_info(text)
+    
+    def _status_update_callback(self, status_data: Dict[str, Any]):
+        """Callback for status updates from chat and task agents.
+        
+        Args:
+            status_data: Status data from API responses
+        """
+        # Update status bar with new data
+        self.status_bar.update_from_status(status_data)
+        
+        # Update status bar for trade results
+        if "new_credits" in status_data and "new_cargo" in status_data:
+            self.status_bar.update_from_trade(status_data)
+        
+        # Update map if sector changed and add to movement history
+        if "sector" in status_data and status_data["sector"] != self.current_sector:
+            old_sector = self.current_sector
+            new_sector = status_data["sector"]
+            
+            # Check if new sector has a port and get its code
+            port_code = ""
+            if "sector_contents" in status_data:
+                contents = status_data["sector_contents"]
+                if contents and contents.get("port"):
+                    port = contents["port"]
+                    # Get the port code (BBB pattern)
+                    port_code = port.get("code", "")
+            
+            # Add to movement history
+            if old_sector is not None:  # Don't add if this is the initial position
+                self.movement_history.add_movement(old_sector, new_sector, port_code)
+            
+            self.current_sector = new_sector
     
     def _debug_callback(self, messages: List[Dict[str, Any]], status: Optional[str] = None):
         """Callback to update debug panel with chat agent messages.
@@ -269,10 +316,15 @@ class PlayerApp(App):
             
             # Check for movement
             if status.sector != self.current_sector:
+                # Get port code if present
+                port_code = ""
+                if status.sector_contents and status.sector_contents.port:
+                    port_code = status.sector_contents.port.code
+                
                 self.movement_history.add_movement(
                     self.current_sector,
                     status.sector,
-                    bool(status.sector_contents.port) if status.sector_contents else False
+                    port_code
                 )
                 self.current_sector = status.sector
             

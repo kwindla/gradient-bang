@@ -118,6 +118,102 @@ def get_chat_tool_definitions() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "check_trade",
+                "description": "Check if a trade is possible and get price information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "commodity": {
+                            "type": "string",
+                            "enum": ["fuel_ore", "organics", "equipment"],
+                            "description": "The commodity to trade",
+                        },
+                        "quantity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Amount to trade",
+                        },
+                        "trade_type": {
+                            "type": "string",
+                            "enum": ["buy", "sell"],
+                            "description": "Whether to buy from or sell to the port",
+                        },
+                    },
+                    "required": ["commodity", "quantity", "trade_type"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "trade",
+                "description": "Execute a trade transaction at the current port",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "commodity": {
+                            "type": "string",
+                            "enum": ["fuel_ore", "organics", "equipment"],
+                            "description": "The commodity to trade",
+                        },
+                        "quantity": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Amount to trade",
+                        },
+                        "trade_type": {
+                            "type": "string",
+                            "enum": ["buy", "sell"],
+                            "description": "Whether to buy from or sell to the port",
+                        },
+                    },
+                    "required": ["commodity", "quantity", "trade_type"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "buy_warp_power",
+                "description": "Buy warp power at the mega-port in sector 0 (must be at sector 0)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "units": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Number of warp power units to buy (2 credits per unit)",
+                        }
+                    },
+                    "required": ["units"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "transfer_warp_power",
+                "description": "Transfer warp power to another character in the same sector",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to_character_id": {
+                            "type": "string",
+                            "description": "Character ID to transfer warp power to",
+                        },
+                        "units": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Number of warp power units to transfer",
+                        }
+                    },
+                    "required": ["to_character_id", "units"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "reset_client",
                 "description": "Reset the game client connection (use for error recovery)",
                 "parameters": {"type": "object", "properties": {}},
@@ -148,6 +244,7 @@ class ChatAgent(BaseLLMAgent):
         verbose_prompts: bool = False,
         output_callback: Optional[Callable[[str], None]] = None,
         debug_callback: Optional[Callable[[List[Dict[str, Any]], Optional[str]], None]] = None,
+        status_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """Initialize the chat agent.
 
@@ -161,6 +258,7 @@ class ChatAgent(BaseLLMAgent):
             verbose_prompts: Whether to print messages as they're added
             output_callback: Optional callback for output lines
             debug_callback: Optional callback to send messages list for debugging
+            status_callback: Optional callback for status updates
         """
         super().__init__(config, verbose_prompts, output_callback)
         self.game_client = game_client
@@ -169,6 +267,7 @@ class ChatAgent(BaseLLMAgent):
         self.cancel_task_callback = cancel_task_callback
         self.get_task_progress_callback = get_task_progress_callback
         self.debug_callback = debug_callback
+        self.status_callback = status_callback
         self.current_task: Optional[asyncio.Task] = None
         self.system_prompt = create_chat_system_prompt()
         self.request_start_time: Optional[float] = None
@@ -303,15 +402,31 @@ class ChatAgent(BaseLLMAgent):
             tool_executor_mapping = {
                 "move": "move",
                 "get_status": "my_status",
+                "buy_warp_power": "buy_warp_power",
+                "transfer_warp_power": "transfer_warp_power",
                 # view_map and scan_port need special handling, not direct delegation
             }
 
             # Delegate to tool executor for supported tools
             if tool_name in tool_executor_mapping:
                 executor_tool_name = tool_executor_mapping[tool_name]
-                return await self.tool_executor.execute_tool(
+                result = await self.tool_executor.execute_tool(
                     executor_tool_name, tool_args
                 )
+                
+                # Emit status update for move, my_status, and warp power operations
+                if self.status_callback and result.get("success"):
+                    if tool_name in ("move", "get_status", "buy_warp_power", "transfer_warp_power"):
+                        # For warp power operations, we need to fetch updated status
+                        if tool_name in ("buy_warp_power", "transfer_warp_power"):
+                            # Get fresh status to update the UI
+                            status = await self.game_client.my_status(self.tool_executor.character_id)
+                            if status:
+                                self.status_callback(status.model_dump())
+                        else:
+                            self.status_callback(result)
+                
+                return result
 
             # Handle chat-specific tools
             if tool_name == "start_task":
@@ -366,31 +481,13 @@ class ChatAgent(BaseLLMAgent):
                     return {"success": False, "error": "No task is currently running"}
 
             elif tool_name == "view_map":
-                show_ports = tool_args.get("show_ports", True)
+                # Just pass through the raw map data - LLMs understand it fine
                 map_data = await self.game_client.my_map(
                     self.tool_executor.character_id
                 )
-
-                sectors_visited = map_data.get("sectors_visited", {})
-                sectors_with_ports = []
-                if show_ports:
-                    for sector_id, sector_data in sectors_visited.items():
-                        if sector_data.get("port_info"):
-                            port = sector_data["port_info"]
-                            sectors_with_ports.append(
-                                {
-                                    "sector": sector_id,
-                                    "class": port.get("class"),
-                                    "buys": port.get("buys", []),
-                                    "sells": port.get("sells", []),
-                                }
-                            )
-
                 return {
                     "success": True,
-                    "total_sectors_visited": map_data.get("total_sectors_visited", len(sectors_visited)),
-                    "ports_discovered": len(sectors_with_ports),
-                    "ports": sectors_with_ports if show_ports else None,
+                    **map_data  # Pass through all the raw data
                 }
 
             elif tool_name == "scan_port":
@@ -402,25 +499,11 @@ class ChatAgent(BaseLLMAgent):
                 sectors_visited = map_data.get("sectors_visited", {})
                 if str(sector) in sectors_visited:
                     sector_data = sectors_visited[str(sector)]
-                    if sector_data.get("port_info"):
-                        port = sector_data["port_info"]
-                        return {
-                            "success": True,
-                            "sector": sector,
-                            "port": {
-                                "class": port.get("class"),
-                                "code": port.get("code"),
-                                "buys": port.get("buys", []),
-                                "sells": port.get("sells", []),
-                                "stock": port.get("stock", {}),
-                                "demand": port.get("demand", {}),
-                            },
-                        }
-                    else:
-                        return {
-                            "success": False,
-                            "error": f"No port in sector {sector}",
-                        }
+                    return {
+                        "success": True,
+                        "sector": sector,
+                        "sector_data": sector_data  # Pass through raw sector data
+                    }
                 else:
                     return {
                         "success": False,
@@ -428,12 +511,71 @@ class ChatAgent(BaseLLMAgent):
                     }
 
             elif tool_name == "check_cargo":
-                # Mock cargo data until server provides it
+                # Get current status which includes ship data
+                status = await self.game_client.my_status()
                 return {
                     "success": True,
-                    "cargo": {"fuel_ore": 0, "organics": 0, "equipment": 0},
-                    "total": 0,
+                    "ship": status.ship.model_dump()  # Pass through all ship data including cargo
                 }
+            
+            elif tool_name == "check_trade":
+                # Check if a trade is possible
+                commodity = tool_args.get("commodity")
+                quantity = tool_args.get("quantity")
+                trade_type = tool_args.get("trade_type")
+                
+                # Log the action
+                self._output(f"Checking trade: {trade_type} {quantity} {commodity}")
+                
+                result = await self.game_client.check_trade(
+                    commodity=commodity,
+                    quantity=quantity,
+                    trade_type=trade_type
+                )
+                
+                # Log the result
+                if result.get("can_trade"):
+                    self._output(f"Trade possible: {quantity} {commodity} at {result.get('price_per_unit')} cr each")
+                    self._output(f"Total cost: {result.get('total_price')} credits")
+                else:
+                    self._output(f"Trade not possible: {result.get('error')}")
+                
+                return result
+            
+            elif tool_name == "trade":
+                # Execute a trade
+                commodity = tool_args.get("commodity")
+                quantity = tool_args.get("quantity")
+                trade_type = tool_args.get("trade_type")
+                
+                # Log the action
+                self._output(f"Executing trade: {trade_type} {quantity} {commodity}")
+                
+                result = await self.game_client.trade(
+                    commodity=commodity,
+                    quantity=quantity,
+                    trade_type=trade_type
+                )
+                
+                # Log the result
+                if result.get("success"):
+                    self._output(f"Trade successful: {trade_type} {quantity} {commodity} at {result.get('price_per_unit')} cr each")
+                    self._output(f"Total: {result.get('total_price')} cr, New balance: {result.get('new_credits')} cr")
+                    # Show port stock for the traded commodity
+                    commodity_keys = {"fuel_ore": "FO", "organics": "OG", "equipment": "EQ"}
+                    if trade_type == "buy" and commodity in commodity_keys:
+                        stock_key = commodity_keys[commodity]
+                        remaining = result.get('port_stock', {}).get(stock_key)
+                        if remaining is not None:
+                            self._output(f"Port stock remaining: {remaining} units")
+                    
+                    # Emit status update for successful trade
+                    if self.status_callback:
+                        self.status_callback(result)
+                else:
+                    self._output(f"Trade failed: {result.get('error', 'Unknown error')}")
+                
+                return result
 
             elif tool_name == "reset_client":
                 await self.game_client.close()

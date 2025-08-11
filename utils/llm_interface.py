@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from openai import AsyncOpenAI
 from utils.game_tools import get_tool_definitions, AsyncToolExecutor
-from utils.prompts import create_system_prompt, create_npc_task_prompt
+from utils.prompts import GAME_DESCRIPTION, TASK_EXECUTION_INSTRUCTIONS
 
 
 def log(message: str, data: dict = None):
@@ -57,7 +57,7 @@ class AsyncLLMAgent:
         self.tool_executor = tool_executor
         self.verbose_prompts = verbose_prompts
         self.messages = []  # Persistent messages array
-        self.system_prompt = create_system_prompt()
+        self.system_prompt = GAME_DESCRIPTION + "\n\n" + TASK_EXECUTION_INSTRUCTIONS
 
     def add_message(self, message: Dict[str, Any]):
         """Add a message to the conversation history."""
@@ -261,9 +261,10 @@ class AsyncLLMAgent:
         self.add_message(system_message)
 
         # Add initial user message with task
+        task_prompt = f"Your task: {task}\n\nCurrent state:\n{json.dumps(initial_state, indent=2)}"
         user_message = {
             "role": "user",
-            "content": create_npc_task_prompt(task, initial_state),
+            "content": task_prompt,
         }
         self.add_message(user_message)
 

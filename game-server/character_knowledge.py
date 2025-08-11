@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Any
 from pydantic import BaseModel, Field
+from ships import ShipType, get_ship_stats
 
 
 class SectorKnowledge(BaseModel):
@@ -22,6 +23,16 @@ class SectorKnowledge(BaseModel):
     adjacent_sectors: List[int] = []
 
 
+class ShipConfiguration(BaseModel):
+    """Current ship configuration for a character."""
+    ship_type: str = ShipType.KESTREL_COURIER.value
+    cargo: Dict[str, int] = {"fuel_ore": 0, "organics": 0, "equipment": 0}
+    current_warp_power: int = 300  # Start with full warp power for Kestrel
+    current_shields: int = 150  # Start with full shields
+    current_fighters: int = 300  # Start with full fighters
+    equipped_modules: List[str] = []
+
+
 class MapKnowledge(BaseModel):
     """Complete map knowledge for a character."""
     character_id: str
@@ -29,6 +40,8 @@ class MapKnowledge(BaseModel):
     total_sectors_visited: int = 0
     first_visit: Optional[str] = None
     last_update: Optional[str] = None
+    ship_config: ShipConfiguration = Field(default_factory=ShipConfiguration)
+    credits: int = 1000  # Starting credits
 
 
 class CharacterKnowledgeManager:
@@ -51,6 +64,34 @@ class CharacterKnowledgeManager:
         
         # Cache for loaded knowledge
         self.cache: Dict[str, MapKnowledge] = {}
+    
+    def initialize_ship(self, character_id: str, ship_type: Optional[ShipType] = None):
+        """Initialize or update a character's ship configuration.
+        
+        Args:
+            character_id: Character ID
+            ship_type: Ship type to assign (defaults to Kestrel Courier)
+        """
+        knowledge = self.load_knowledge(character_id)
+        
+        if ship_type is None:
+            ship_type = ShipType.KESTREL_COURIER
+        
+        # Get ship stats
+        stats = get_ship_stats(ship_type)
+        
+        # Update ship configuration
+        knowledge.ship_config = ShipConfiguration(
+            ship_type=ship_type.value,
+            cargo={"fuel_ore": 0, "organics": 0, "equipment": 0},
+            current_warp_power=stats.warp_power_capacity,  # Start with full warp power
+            current_shields=stats.shields,  # Start with full shields
+            current_fighters=stats.fighters,  # Start with full fighters
+            equipped_modules=[]
+        )
+        
+        # Save the updated knowledge
+        self.save_knowledge(knowledge)
     
     def get_file_path(self, character_id: str) -> Path:
         """Get the file path for a character's knowledge.
@@ -293,3 +334,51 @@ class CharacterKnowledgeManager:
                     port_pairs.append(pair)
         
         return port_pairs
+    
+    def update_credits(self, character_id: str, credits: int) -> None:
+        """Update a character's credits and save to disk.
+        
+        Args:
+            character_id: Character ID
+            credits: New credit amount
+        """
+        knowledge = self.load_knowledge(character_id)
+        knowledge.credits = credits
+        self.save_knowledge(knowledge)
+    
+    def get_credits(self, character_id: str) -> int:
+        """Get a character's current credits.
+        
+        Args:
+            character_id: Character ID
+            
+        Returns:
+            Current credit amount
+        """
+        knowledge = self.load_knowledge(character_id)
+        return knowledge.credits
+    
+    def update_cargo(self, character_id: str, commodity: str, quantity_delta: int) -> None:
+        """Update a character's cargo and save to disk.
+        
+        Args:
+            character_id: Character ID
+            commodity: Commodity type (fuel_ore, organics, equipment)
+            quantity_delta: Change in quantity (positive for add, negative for remove)
+        """
+        knowledge = self.load_knowledge(character_id)
+        current = knowledge.ship_config.cargo.get(commodity, 0)
+        knowledge.ship_config.cargo[commodity] = max(0, current + quantity_delta)
+        self.save_knowledge(knowledge)
+    
+    def get_cargo(self, character_id: str) -> Dict[str, int]:
+        """Get a character's current cargo.
+        
+        Args:
+            character_id: Character ID
+            
+        Returns:
+            Current cargo dictionary
+        """
+        knowledge = self.load_knowledge(character_id)
+        return knowledge.ship_config.cargo.copy()

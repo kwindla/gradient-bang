@@ -111,14 +111,14 @@ class TaskAgent(BaseLLMAgent):
 
             result = await self.tool_executor.execute_tool(tool_name, tool_args)
 
-            self._log_tool_result(tool_name, result)
+            self._log_tool_result(tool_name, result, tool_args)
 
             tool_message = self.format_tool_message(tool_call["id"], result)
             tool_messages.append(tool_message)
 
         return tool_messages
 
-    def _log_tool_result(self, tool_name: str, result: Dict[str, Any]):
+    def _log_tool_result(self, tool_name: str, result: Dict[str, Any], tool_args: Dict[str, Any] = None):
         """Log special events based on tool results."""
         if tool_name == "move" and result.get("success"):
             move_info = {
@@ -192,6 +192,59 @@ class TaskAgent(BaseLLMAgent):
                     f"Map knowledge: {len(sectors_visited)} sectors visited, {ports_known} ports known"
                 )
 
+        elif tool_name == "check_trade":
+            if result.get("success"):
+                if result.get("can_trade"):
+                    self._output(
+                        f"Trade check: Can {tool_args.get('trade_type', 'trade')} "
+                        f"{tool_args.get('quantity', 0)} {tool_args.get('commodity', 'items')} "
+                        f"at {result.get('price_per_unit', 0)} cr/unit "
+                        f"(total: {result.get('total_price', 0)} cr)"
+                    )
+                else:
+                    self._output(f"Trade check failed: {result.get('error', 'Cannot trade')}")
+            else:
+                self._output(f"Trade check error: {result.get('error', 'Unknown error')}")
+        
+        elif tool_name == "trade":
+            if result.get("success"):
+                trade_type = result.get("trade_type", "trade")
+                commodity = result.get("commodity", "items")
+                quantity = result.get("quantity", 0)
+                price = result.get("price_per_unit", 0)
+                total = result.get("total_price", 0)
+                new_credits = result.get("new_credits", 0)
+                
+                self._output(
+                    f"Trade executed: {trade_type} {quantity} {commodity} "
+                    f"at {price} cr/unit (total: {total} cr). "
+                    f"New balance: {new_credits} cr"
+                )
+                
+                # Also log cargo changes if available
+                if "new_cargo" in result:
+                    cargo = result["new_cargo"]
+                    self._output(
+                        f"Cargo now: FO:{cargo.get('fuel_ore', 0)} "
+                        f"OG:{cargo.get('organics', 0)} "
+                        f"EQ:{cargo.get('equipment', 0)}"
+                    )
+            else:
+                self._output(f"Trade failed: {result.get('error', 'Unknown error')}")
+        
+        elif tool_name == "find_profitable_route":
+            if result.get("success"):
+                if result.get("found_route"):
+                    self._output(
+                        f"Profitable route found: Buy {result.get('commodity')} at sector {result.get('buy_sector')} "
+                        f"for {result.get('buy_price')} cr, sell at sector {result.get('sell_sector')} "
+                        f"for {result.get('sell_price')} cr (profit: {result.get('profit_per_unit')} cr/unit)"
+                    )
+                else:
+                    self._output("No profitable routes found within range")
+            else:
+                self._output(f"Route finding error: {result.get('error', 'Unknown error')}")
+        
         elif tool_name == "finished":
             self._output(f"Task finished: {result.get('message', 'Done')}")
 

@@ -21,7 +21,8 @@ class TaskManager:
         task_config: Optional[LLMConfig] = None,
         output_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[str, str], None]] = None,
-        task_complete_callback: Optional[Callable[[bool], None]] = None
+        task_complete_callback: Optional[Callable[[bool], None]] = None,
+        status_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     ):
         """Initialize the task manager.
         
@@ -33,6 +34,7 @@ class TaskManager:
             output_callback: Callback for task output lines
             progress_callback: Callback for progress updates (action, description)
             task_complete_callback: Callback when task completes (receives was_cancelled flag)
+            status_callback: Callback for status updates from chat and task agents
         """
         self.game_client = game_client
         self.character_id = character_id
@@ -44,9 +46,10 @@ class TaskManager:
         self.output_callback = output_callback
         self.progress_callback = progress_callback
         self.task_complete_callback = task_complete_callback
+        self.status_callback = status_callback
         
-        # Create tool executor
-        self.tool_executor = AsyncToolExecutor(game_client, character_id)
+        # Create tool executor with status callback
+        self.tool_executor = AsyncToolExecutor(game_client, character_id, status_callback)
         
         # Create task agent with gpt-5 for complex planning
         self.task_agent = TaskAgent(
@@ -65,7 +68,8 @@ class TaskManager:
             cancel_task_callback=self.cancel_task,
             get_task_progress_callback=self.get_task_progress,
             verbose_prompts=False,
-            debug_callback=None  # Will be set by PlayerApp
+            debug_callback=None,  # Will be set by PlayerApp
+            status_callback=status_callback
         )
         
         # Task management

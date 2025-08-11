@@ -28,9 +28,8 @@ class PortInfo(BaseModel):
     buys: List[str]
     sells: List[str]
     stock: Dict[str, int]
-    stock_max: Dict[str, int]
-    demand: Dict[str, int]
-    demand_max: Dict[str, int]
+    max_capacity: Dict[str, int]
+    prices: Optional[Dict[str, Optional[int]]] = None
 
 
 class PlanetInfo(BaseModel):
@@ -40,12 +39,35 @@ class PlanetInfo(BaseModel):
     class_name: str
 
 
+class PlayerInfo(BaseModel):
+    """Information about another player visible in a sector."""
+    character_id: str
+    ship_type: str
+    ship_name: str
+
+
 class SectorContents(BaseModel):
     """Contents of a sector visible to players."""
     port: Optional[PortInfo] = None
     planets: List[PlanetInfo] = Field(default_factory=list)
-    other_players: List[str] = Field(default_factory=list)
+    other_players: List[PlayerInfo] = Field(default_factory=list)
     adjacent_sectors: List[int] = Field(default_factory=list)
+
+
+class ShipStatus(BaseModel):
+    """Ship status information."""
+    ship_type: str
+    ship_name: str
+    cargo: Dict[str, int]
+    cargo_capacity: int
+    cargo_used: int
+    warp_power: int
+    warp_power_capacity: int
+    shields: int
+    max_shields: int
+    fighters: int
+    max_fighters: int
+    credits: int
 
 
 class CharacterStatus(BaseModel):
@@ -54,6 +76,7 @@ class CharacterStatus(BaseModel):
     sector: int
     last_active: str
     sector_contents: SectorContents
+    ship: ShipStatus
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +99,7 @@ class AsyncGameClient:
         self._map_cache: Dict[str, Dict[str, Any]] = {}
         self._current_character: Optional[str] = character_id
         self._current_sector: Optional[int] = None
+        self._ship_status: Optional[ShipStatus] = None
         
         # Locks for thread-safe operations
         self._cache_lock = asyncio.Lock()
@@ -91,6 +115,11 @@ class AsyncGameClient:
         """Get the currently tracked character ID."""
         return self._current_character
     
+    @property
+    def ship_status(self) -> Optional[ShipStatus]:
+        """Get the current ship status."""
+        return self._ship_status
+    
     async def __aenter__(self):
         """Enter async context manager."""
         return self
@@ -103,11 +132,12 @@ class AsyncGameClient:
         """Close the HTTP client."""
         await self.client.aclose()
     
-    async def join(self, character_id: str) -> CharacterStatus:
+    async def join(self, character_id: str, ship_type: Optional[str] = None) -> CharacterStatus:
         """Join the game with a character.
         
         Args:
             character_id: Unique identifier for the character
+            ship_type: Optional ship type to start with (defaults to Kestrel Courier)
             
         Returns:
             Character status after joining
@@ -115,9 +145,13 @@ class AsyncGameClient:
         Raises:
             httpx.HTTPStatusError: If the request fails
         """
+        payload = {"character_id": character_id}
+        if ship_type:
+            payload["ship_type"] = ship_type
+        
         response = await self.client.post(
             f"{self.base_url}/api/join",
-            json={"character_id": character_id}
+            json=payload
         )
         response.raise_for_status()
         status = CharacterStatus(**response.json())
@@ -126,6 +160,7 @@ class AsyncGameClient:
             # Set current character and sector, fetch initial map data
             self._current_character = character_id
             self._current_sector = status.sector
+            self._ship_status = status.ship
         
         await self._fetch_and_cache_map(character_id)
         
@@ -170,6 +205,7 @@ class AsyncGameClient:
         async with self._status_lock:
             if character_id == self._current_character:
                 self._current_sector = status.sector
+            self._ship_status = status.ship
         
         # Update map cache with new sector information
         await self._update_map_cache_from_status(character_id, status)
@@ -327,9 +363,8 @@ class AsyncGameClient:
                     "buys": port.buys,
                     "sells": port.sells,
                     "stock": port.stock,
-                    "stock_max": port.stock_max,
-                    "demand": port.demand,
-                    "demand_max": port.demand_max
+                    "max_capacity": port.max_capacity,
+                    "prices": port.prices
                 }
             
             # Update planet information if present
@@ -563,3 +598,175 @@ class AsyncGameClient:
                     port_pairs.append(pair)
         
         return port_pairs
+    
+    async def check_trade(
+        self,
+        commodity: str,
+        quantity: int,
+        trade_type: str,
+        character_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Preview a trade transaction without executing it.
+        
+        Args:
+            commodity: Commodity to trade (fuel_ore, organics, equipment)
+            quantity: Amount to trade
+            trade_type: "buy" or "sell"
+            character_id: Character making the trade (defaults to current character)
+            
+        Returns:
+            Trade preview including prices and validation
+            
+        Raises:
+            httpx.HTTPStatusError: If the request fails
+        """
+        if character_id is None:
+            character_id = self._current_character
+        if character_id is None:
+            raise ValueError("No character specified or tracked")
+        
+        response = await self.client.post(
+            f"{self.base_url}/api/check_trade",
+            json={
+                "character_id": character_id,
+                "commodity": commodity,
+                "quantity": quantity,
+                "trade_type": trade_type
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def trade(
+        self,
+        commodity: str,
+        quantity: int,
+        trade_type: str,
+        character_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Execute a trade transaction.
+        
+        Args:
+            commodity: Commodity to trade (fuel_ore, organics, equipment)
+            quantity: Amount to trade
+            trade_type: "buy" or "sell"
+            character_id: Character making the trade (defaults to current character)
+            
+        Returns:
+            Trade result including new credits and cargo
+            
+        Raises:
+            httpx.HTTPStatusError: If the request fails
+        """
+        if character_id is None:
+            character_id = self._current_character
+        if character_id is None:
+            raise ValueError("No character specified or tracked")
+        
+        response = await self.client.post(
+            f"{self.base_url}/api/trade",
+            json={
+                "character_id": character_id,
+                "commodity": commodity,
+                "quantity": quantity,
+                "trade_type": trade_type
+            }
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # Update cache if successful
+        if result.get("success"):
+            # The trade changes our credits and cargo, so we should invalidate status cache
+            # (In a real implementation, we might update the cache instead of invalidating)
+            pass
+        
+        return result
+    
+    async def find_profitable_route(
+        self,
+        character_id: Optional[str] = None,
+        max_distance: int = 10
+    ) -> Optional[Dict[str, Any]]:
+        """Find a profitable trade route from known ports.
+        
+        Args:
+            character_id: Character to analyze for (defaults to current character)
+            max_distance: Maximum distance to consider for routes
+            
+        Returns:
+            Profitable route information or None if no profitable route found
+        """
+        if character_id is None:
+            character_id = self._current_character
+        if character_id is None:
+            raise ValueError("No character specified or tracked")
+        
+        # Get current status to know where we are
+        status = await self.my_status(character_id)
+        current_sector = status["sector"]
+        current_cargo = status["ship"]["cargo"]
+        
+        # Get known ports
+        ports = await self.find_port(character_id=character_id)
+        if not ports:
+            return None
+        
+        best_route = None
+        best_profit = 0
+        
+        # Analyze each known port
+        for port_info in ports:
+            port_sector = port_info["sector"]
+            port = port_info["port"]
+            
+            # Skip if too far
+            distance = port_info.get("distance", float('inf'))
+            if distance > max_distance:
+                continue
+            
+            # Check what we can buy here
+            if port.get("sells") and "prices" in port:
+                for commodity in port["sells"]:
+                    if commodity not in port["prices"]:
+                        continue
+                    
+                    buy_price = port["prices"][commodity].get("sell")
+                    if buy_price is None:
+                        continue
+                    
+                    # Find ports that buy this commodity
+                    for other_port_info in ports:
+                        if other_port_info["sector"] == port_sector:
+                            continue
+                        
+                        other_port = other_port_info["port"]
+                        if commodity in other_port.get("buys", []) and "prices" in other_port:
+                            sell_price = other_port["prices"][commodity].get("buy")
+                            if sell_price is None:
+                                continue
+                            
+                            # Calculate profit
+                            profit_per_unit = sell_price - buy_price
+                            if profit_per_unit > 0:
+                                # Consider distance
+                                total_distance = distance + other_port_info.get("distance", float('inf'))
+                                if total_distance <= max_distance * 2:
+                                    profit_efficiency = profit_per_unit / max(1, total_distance)
+                                    
+                                    if profit_efficiency > best_profit:
+                                        best_profit = profit_efficiency
+                                        best_route = {
+                                            "buy_sector": port_sector,
+                                            "buy_port": port,
+                                            "sell_sector": other_port_info["sector"],
+                                            "sell_port": other_port,
+                                            "commodity": commodity,
+                                            "buy_price": buy_price,
+                                            "sell_price": sell_price,
+                                            "profit_per_unit": profit_per_unit,
+                                            "total_distance": total_distance,
+                                            "profit_efficiency": profit_efficiency
+                                        }
+        
+        return best_route
